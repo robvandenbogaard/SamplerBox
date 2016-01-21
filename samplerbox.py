@@ -124,9 +124,10 @@ class PlayingSound:
 
 class Sound:
 
-    def __init__(self, filename, midinote, velocity):
+    def __init__(self, filename, midichannel, midinote, velocity):
         wf = waveread(filename)
         self.fname = filename
+        self.midichannel = midichannel
         self.midinote = midinote
         self.velocity = velocity
         if wf.getloops():
@@ -154,7 +155,7 @@ class Sound:
             npdata = numpy.repeat(npdata, 2)
         return npdata
 
-FADEOUTLENGTH = 30000
+FADEOUTLENGTH = 300
 FADEOUT = numpy.linspace(1., 0., FADEOUTLENGTH)            # by default, float64
 FADEOUT = numpy.power(FADEOUT, 6)
 FADEOUT = numpy.append(FADEOUT, numpy.zeros(FADEOUTLENGTH, numpy.float32)).astype(numpy.float32)
@@ -193,7 +194,7 @@ def MidiCallback(message, time_stamp):
     global playingnotes, sustain, sustainplayingnotes
     global preset
     messagetype = message[0] >> 4
-    messagechannel = (message[0] & 15) + 1
+    midichannel = (message[0] & 15) + 1
     note = message[1] if len(message) > 1 else None
     midinote = note
     velocity = message[2] if len(message) > 2 else None
@@ -204,7 +205,7 @@ def MidiCallback(message, time_stamp):
     if messagetype == 9:    # Note on
         midinote += globaltranspose
         try:
-            playingnotes.setdefault(midinote, []).append(samples[midinote, velocity].play(midinote))
+            playingnotes.setdefault(midinote, []).append(samples[midichannel, midinote, velocity].play(midinote))
         except:
             pass
 
@@ -268,6 +269,7 @@ def ActuallyLoad():
     samples = {}
     globalvolume = 10 ** (-12.0/20)  # -12dB default global volume
     globaltranspose = 0
+    channels = set([])
 
     basename = next((f for f in os.listdir(SAMPLES_DIR) if f.startswith("%d " % preset)), None)      # or next(glob.iglob("blah*"), None)
     if basename:
@@ -290,25 +292,30 @@ def ActuallyLoad():
                     if r'%%transpose' in pattern:
                         globaltranspose = int(pattern.split('=')[1].strip())
                         continue
-                    defaultparams = {'midinote': '0', 'velocity': '127', 'notename': ''}
+                    defaultparams = {'midichannel': '1', 'midinote': '0', 'velocity': '127', 'notename': ''}
                     if len(pattern.split(',')) > 1:
                         defaultparams.update(dict([item.split('=') for item in pattern.split(',', 1)[1].replace(' ', '').replace('%', '').split(',')]))
                     pattern = pattern.split(',')[0]
                     pattern = re.escape(pattern.strip())
-                    pattern = pattern.replace(r"\%midinote", r"(?P<midinote>\d+)").replace(r"\%velocity", r"(?P<velocity>\d+)")\
-                                     .replace(r"\%notename", r"(?P<notename>[A-Ga-g]#?[0-9])").replace(r"\*", r".*?").strip()    # .*? => non greedy
+                    pattern = pattern.replace(r"\%midichannel", r"(?P<midichannel>\d+)")\
+                                     .replace(r"\%midinote", r"(?P<midinote>\d+)")\
+                                     .replace(r"\%velocity", r"(?P<velocity>\d+)")\
+                                     .replace(r"\%notename", r"(?P<notename>[A-Ga-g]#?[0-9])")\
+                                     .replace(r"\*", r".*?").strip()    # .*? => non greedy
                     for fname in os.listdir(dirname):
                         if LoadingInterrupt:
                             return
                         m = re.match(pattern, fname)
                         if m:
                             info = m.groupdict()
+                            midichannel = int(info.get('midichannel', defaultparams['midichannel']))
                             midinote = int(info.get('midinote', defaultparams['midinote']))
                             velocity = int(info.get('velocity', defaultparams['velocity']))
                             notename = info.get('notename', defaultparams['notename'])
                             if notename:
                                 midinote = NOTES.index(notename[:-1].lower()) + (int(notename[-1])+2) * 12
-                            samples[midinote, velocity] = Sound(os.path.join(dirname, fname), midinote, velocity)
+                            samples[midichannel, midinote, velocity] = Sound(os.path.join(dirname, fname), midichannel, midinote, velocity)
+                            channels.add(midichannel)
                 except:
                     print "Error in definition file, skipping line %s." % (i+1)
 
@@ -318,25 +325,27 @@ def ActuallyLoad():
                 return
             file = os.path.join(dirname, "%d.wav" % midinote)
             if os.path.isfile(file):
-                samples[midinote, 127] = Sound(file, midinote, 127)
+                samples[1, midinote, 127] = Sound(file, 1, midinote, 127)
+                channels.add(1)
 
     initial_keys = set(samples.keys())
-    for midinote in xrange(128):
-        lastvelocity = None
-        for velocity in xrange(128):
-            if (midinote, velocity) not in initial_keys:
-                samples[midinote, velocity] = lastvelocity
-            else:
-                if not lastvelocity:
-                    for v in xrange(velocity):
-                        samples[midinote, v] = samples[midinote, velocity]
-                lastvelocity = samples[midinote, velocity]
-        if not lastvelocity:
+    for midichannel in channels:
+        for midinote in xrange(128):
+            lastvelocity = None
             for velocity in xrange(128):
-                try:
-                    samples[midinote, velocity] = samples[midinote-1, velocity]
-                except:
-                    pass
+                if (midichannel, midinote, velocity) not in initial_keys:
+                    samples[midichannel, midinote, velocity] = lastvelocity
+                else:
+                    if not lastvelocity:
+                        for v in xrange(velocity):
+                            samples[midichannel, midinote, v] = samples[midichannel, midinote, velocity]
+                    lastvelocity = samples[midichannel, midinote, velocity]
+            if not lastvelocity:
+                for velocity in xrange(128):
+                    try:
+                        samples[midichannel, midinote, velocity] = samples[midichannel, midinote-1, velocity]
+                    except:
+                        pass
     if len(initial_keys) > 0:
         print 'Preset loaded: ' + str(preset)
         display("%04d" % preset)
